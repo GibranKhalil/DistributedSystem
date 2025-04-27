@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+import random
 from models.distributed_coordinator import DistributedCoordinator
 from models.node import Node
 from models.message import Message
@@ -13,6 +14,7 @@ logging.basicConfig(
 )
 
 def monitor_messages(client: Node, duration: int):
+    """Monitora mensagens recebidas por um cliente"""
     start_time = time.time()
     while time.time() - start_time < duration:
         message = client.consume_message()
@@ -20,34 +22,46 @@ def monitor_messages(client: Node, duration: int):
             print(f"[{client.id}] Recebeu: {message}")
         time.sleep(0.5)
 
-def resource_usage_test(system: DistributedCoordinator):
-    print("\n===== TESTE DE EXCLUSÃO MÚTUA =====")
+def stress_test(system: DistributedCoordinator, num_messages: int = 50):
+    """Teste de estresse com muitas mensagens simultâneas"""
+    print("\n===== TESTE DE ESTRESSE =====")
     
-    system.create_resource("impressora")
+    for i in range(3):
+        system.create_channel(f"canal_{i}")
+        for client_id in system.clients:
+            system.subscribe_to_channel(client_id, f"canal_{i}")
     
-    def use_resource(client: Node, resource_id: str, delay: float = 0):
-        time.sleep(delay)
-        print(f"[{client.id}] tentando acessar {resource_id}")
-        
-        if client.request_resource(resource_id):
-            print(f"[{client.id}] adquiriu {resource_id}")
-            time.sleep(2)
-            client.release_resource(resource_id)
-            print(f"[{client.id}] liberou {resource_id}")
-        else:
-            print(f"[{client.id}] não conseguiu acessar {resource_id}")
+    def sender(client: Node):
+        for i in range(num_messages):
+            msg_type = random.choice(['unicast', 'multicast', 'broadcast'])
+            if msg_type == 'unicast':
+                target = random.choice(list(system.clients.keys()))
+                if target != client.id:
+                    client.send_unicast(target, f"Msg {i} de {client.id}")
+            elif msg_type == 'multicast':
+                channel = f"canal_{random.randint(0, 2)}"
+                client.send_multicast(channel, f"Msg {i} no {channel}")
+            else:
+                client.send_broadcast(f"Broadcast {i} de {client.id}")
+            time.sleep(random.uniform(0.1, 0.5))
     
     threads = []
-    for idx, client_id in enumerate(["cliente1", "cliente2", "cliente3"]):
-        thread = threading.Thread(
-            target=use_resource, 
-            args=(system.clients[client_id], "impressora", idx * 1.0)
-        )
-        threads.append(thread)
-        thread.start()
+    for client in system.clients.values():
+        t = threading.Thread(target=sender, args=(client,))
+        threads.append(t)
+        t.start()
     
-    for thread in threads:
-        thread.join()
+    monitor_threads = []
+    for client in system.clients.values():
+        t = threading.Thread(target=monitor_messages, args=(client, 30))
+        monitor_threads.append(t)
+        t.start()
+    
+    for t in threads:
+        t.join()
+    
+    for t in monitor_threads:
+        t.join()
 
 def messaging_test(system: DistributedCoordinator):
     print("\n===== TESTE DE MENSAGENS =====")
@@ -85,18 +99,122 @@ def messaging_test(system: DistributedCoordinator):
     for monitor in monitors:
         monitor.join()
 
+
+def resource_contention_test(system: DistributedCoordinator):
+    """Teste de contenção de recursos com múltiplos recursos e clientes"""
+    print("\n===== TESTE DE CONTENÇÃO DE RECURSOS =====")
+    
+    resources = ["impressora", "scanner", "servidor", "disco"]
+    for res in resources:
+        system.create_resource(res)
+    
+    def use_resources(client: Node):
+        for _ in range(5):
+            res = random.choice(resources)
+            print(f"[{client.id}] Tentando acessar {res}")
+            
+            if client.request_resource(res):
+                print(f"[{client.id}] Adquiriu {res}")
+                time.sleep(random.uniform(0.5, 2))
+                client.release_resource(res)
+                print(f"[{client.id}] Liberou {res}")
+            else:
+                print(f"[{client.id}] Não conseguiu acessar {res}")
+            time.sleep(random.uniform(0.5, 1))
+    
+    threads = []
+    for client in system.clients.values():
+        t = threading.Thread(target=use_resources, args=(client,))
+        threads.append(t)
+        t.start()
+    
+    for t in threads:
+        t.join()
+
+def failure_recovery_test(system: DistributedCoordinator):
+    """Teste de recuperação de falhas"""
+    print("\n===== TESTE DE RECUPERAÇÃO DE FALHAS =====")
+    
+    system.create_resource("banco_de_dados")
+    system.create_channel("backup")
+    for client_id in system.clients:
+        system.subscribe_to_channel(client_id, "backup")
+    
+    def failing_client_behavior(client: Node):
+        if client.request_resource("banco_de_dados"):
+            print(f"[{client.id}] Adquiriu o recurso e vai falhar")
+            time.sleep(1)
+            print(f"[{client.id}] Simulando falha...")
+            return
+        
+    bad_client = system.clients["cliente1"]
+    t = threading.Thread(target=failing_client_behavior, args=(bad_client,))
+    t.start()
+    t.join()
+    
+    def normal_client_behavior(client: Node):
+        time.sleep(random.uniform(0.5, 2))
+        if client.request_resource("banco_de_dados"):
+            print(f"[{client.id}] Conseguiu acessar após falha")
+            time.sleep(1)
+            client.release_resource("banco_de_dados")
+        else:
+            print(f"[{client.id}] Não conseguiu acessar")
+    
+    threads = []
+    for client_id, client in system.clients.items():
+        if client_id != "cliente1":
+            t = threading.Thread(target=normal_client_behavior, args=(client,))
+            threads.append(t)
+            t.start()
+    
+    for t in threads:
+        t.join()
+    
+    print("\nVerificando estado do sistema após falha...")
+    time.sleep(3)
+
+def clock_sync_test(system: DistributedCoordinator):
+    """Teste de sincronização de relógios"""
+    print("\n===== TESTE DE SINCRONIZAÇÃO DE RELÓGIOS =====")
+    
+    def send_messages(client: Node):
+        for i in range(3):
+            time.sleep(random.uniform(0.1, 0.5))
+            target = random.choice(list(system.clients.keys()))
+            if target != client.id:
+                client.send_unicast(target, f"Msg {i} para verificar relógio")
+    
+    threads = []
+    for client in system.clients.values():
+        t = threading.Thread(target=send_messages, args=(client,))
+        threads.append(t)
+        t.start()
+    
+    for t in threads:
+        t.join()
+    
+    time.sleep(1)
+    print("\nRelógio global:", system.global_clock.get_time())
+
 if __name__ == "__main__":
-    
     system = DistributedCoordinator()
-    
-    for i in range(1, 5):
+    for i in range(1, 6):
         system.register_client(f"cliente{i}")
+    
+    print("======== INICIANDO TESTES COMPLETOS ========")
     
     messaging_test(system)
     
-    resource_usage_test(system)
+    stress_test(system, num_messages=30)
+    resource_contention_test(system)
+    failure_recovery_test(system)
+    clock_sync_test(system)
     
     print("\n===== LOGS DO SISTEMA =====")
-    with open('log.log', 'r') as f:
-        log_content = f.read()
-        print(log_content if log_content else "Nenhum log disponível")
+    try:
+        with open('distributed_coordinator.log', 'r') as f:
+            log_content = f.read()
+            print(log_content if log_content else "Nenhum log disponível")
+    except FileNotFoundError:
+        print("Arquivo de log não encontrado")
